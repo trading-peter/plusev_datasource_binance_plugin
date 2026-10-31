@@ -12,13 +12,13 @@ import (
 	"strings"
 	"time"
 
-	ex "github.com/plusev-terminal/go-plugin-common/datasrc/exchange"
-	"github.com/plusev-terminal/go-plugin-common/logging"
-	"github.com/plusev-terminal/go-plugin-common/plugin"
-	"github.com/plusev-terminal/go-plugin-common/requester"
-	rt "github.com/plusev-terminal/go-plugin-common/requester/types"
-	tt "github.com/plusev-terminal/go-plugin-common/trading"
-	"github.com/plusev-terminal/go-plugin-common/utils"
+	ex "github.com/plusev-terminal/go-plugin-common/v2/datasrc/exchange"
+	"github.com/plusev-terminal/go-plugin-common/v2/logging"
+	"github.com/plusev-terminal/go-plugin-common/v2/plugin"
+	"github.com/plusev-terminal/go-plugin-common/v2/requester"
+	rt "github.com/plusev-terminal/go-plugin-common/v2/requester/types"
+	tt "github.com/plusev-terminal/go-plugin-common/v2/trading"
+	"github.com/plusev-terminal/go-plugin-common/v2/utils"
 )
 
 type Client struct {
@@ -111,7 +111,7 @@ func parseBinanceSymbolToMarketInfo(sym binanceSymbol, assetType string) tt.Mark
 		Symbol:    sym.Symbol,
 		Base:      sym.BaseAsset,
 		Quote:     sym.QuoteAsset,
-		AssetType: assetType, // caller sets "spot", "perpetual", etc.
+		AssetType: tt.AssetType(assetType), // caller sets "spot", "perpetual", etc.
 		Status:    sym.Status,
 		Label:     fmt.Sprintf("%s/%s", sym.BaseAsset, sym.QuoteAsset),
 	}

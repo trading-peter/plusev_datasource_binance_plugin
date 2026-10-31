@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	m "github.com/plusev-terminal/go-plugin-common/meta"
+	m "github.com/plusev-terminal/go-plugin-common/v2/meta"
 )
 
 // TestRateLimitDeclarations pins the manifest rate-limit table (hosts, limits,

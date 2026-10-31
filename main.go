@@ -6,12 +6,12 @@ import (
 	"strings"
 	"time"
 
-	ex "github.com/plusev-terminal/go-plugin-common/datasrc/exchange"
-	acct "github.com/plusev-terminal/go-plugin-common/datasrc/exchange/account"
-	m "github.com/plusev-terminal/go-plugin-common/meta"
-	"github.com/plusev-terminal/go-plugin-common/plugin"
-	"github.com/plusev-terminal/go-plugin-common/requester"
-	commonstream "github.com/plusev-terminal/go-plugin-common/stream"
+	ex "github.com/plusev-terminal/go-plugin-common/v2/datasrc/exchange"
+	acct "github.com/plusev-terminal/go-plugin-common/v2/datasrc/exchange/account"
+	m "github.com/plusev-terminal/go-plugin-common/v2/meta"
+	"github.com/plusev-terminal/go-plugin-common/v2/plugin"
+	"github.com/plusev-terminal/go-plugin-common/v2/requester"
+	commonstream "github.com/plusev-terminal/go-plugin-common/v2/stream"
 
 	"github.com/trading-peter/plusev_datasource_binance_plugin/binance"
 )
@@ -235,7 +235,7 @@ func (p *BinancePlugin) handleGetTimeframes(params map[string]any) plugin.Respon
 func (p *BinancePlugin) handleGetOHLCV(params map[string]any) plugin.Response {
 	ohlcvParams := ex.GetOHLCVParamsFromMap(params)
 	assetType := "spot"
-	if at := strings.TrimSpace(ohlcvParams.Market.AssetType); at != "" {
+	if at := strings.TrimSpace(string(ohlcvParams.Market.AssetType)); at != "" {
 		assetType = at
 	}
 
@@ -257,7 +257,7 @@ func (p *BinancePlugin) handleOHLCVStream(params map[string]any) plugin.Response
 		return plugin.ErrorResponseMsg("market.symbol is required")
 	}
 
-	assetType := strings.TrimSpace(streamParams.Market.AssetType)
+	assetType := strings.TrimSpace(string(streamParams.Market.AssetType))
 
 	streamReq := plugin.StreamSetupRequest{
 		StreamID:   fmt.Sprintf("binance_ohlcv_%s_%s", resolvedSymbol, streamParams.Timeframe),
@@ -662,8 +662,8 @@ func (p *BinancePlugin) handleGetOrders(params map[string]any) plugin.Response {
 			RemainingQuantity: remaining,
 			TimeInForce:       normalizeBinanceTimeInForce(o.TimeInForce),
 			PostOnly:          postOnly,
+			TriggerPrice:      o.StopPrice,
 			Components: map[string]string{
-				"stop_price":            o.StopPrice,
 				"cummulative_quote_qty": o.CummulativeQuoteQty,
 				"orig_quote_qty":        o.OrigQuoteOrderQty,
 			},
@@ -728,11 +728,11 @@ func (p *BinancePlugin) handleGetOrders(params map[string]any) plugin.Response {
 			TimeInForce:       normalizeBinanceTimeInForce(o.TimeInForce),
 			ReduceOnly:        o.ReduceOnly,
 			PostOnly:          postOnly,
+			TriggerPrice:      firstNonEmptyString(o.StopPrice, o.ActivatePrice),
+			TriggerSource:     normalizeBinanceWorkingType(o.WorkingType),
 			Components: map[string]string{
-				"stop_price":     o.StopPrice,
 				"position_side":  o.PositionSide,
 				"cum_quote":      o.CumQuote,
-				"working_type":   o.WorkingType,
 				"activate_price": o.ActivatePrice,
 				"price_rate":     o.PriceRate,
 			},
@@ -758,6 +758,30 @@ func (p *BinancePlugin) handleGetOrders(params map[string]any) plugin.Response {
 	}
 
 	return plugin.SuccessResponse(resp)
+}
+
+// firstNonEmptyString returns the first argument that is not empty; trailing
+// stop orders carry their activation price where stops carry stopPrice.
+func firstNonEmptyString(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// normalizeBinanceWorkingType maps Binance futures workingType onto the
+// contract's TriggerSource; empty stays empty (venue default = CONTRACT_PRICE).
+func normalizeBinanceWorkingType(t string) acct.TriggerSource {
+	switch strings.ToUpper(strings.TrimSpace(t)) {
+	case "MARK_PRICE":
+		return acct.TriggerSourceMark
+	case "CONTRACT_PRICE":
+		return acct.TriggerSourceLast
+	default:
+		return ""
+	}
 }
 
 // ============================================================================
