@@ -396,6 +396,7 @@ func (c *Client) HandleStreamMessage(msg plugin.StreamMessageRequest) (plugin.St
 	low := utils.GetValue("l", kline, "0")
 	close := utils.GetValue("c", kline, "0")
 	volume := utils.GetValue("v", kline, "0")
+	isFinal := utils.GetValue("x", kline, false)
 
 	// Convert to OHLCVRecord
 	record := tt.OHLCVRecord{
@@ -405,6 +406,7 @@ func (c *Client) HandleStreamMessage(msg plugin.StreamMessageRequest) (plugin.St
 		Low:      low,
 		Close:    close,
 		Volume:   volume,
+		IsClosed: isFinal,
 	}
 
 	return plugin.StreamResponse("ohlcv", record), nil
@@ -488,10 +490,19 @@ func (c *Client) GetAccountInfo(assetType string) (*AccountInfo, error) {
 		base = c.umBaseURL
 	}
 
+	// Weights: /api/v3/account = 20, /fapi/v2/account = 5.
+	// https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/account
+	// https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/account
+	cost := 20
+	if assetType == "futures" {
+		cost = 5
+	}
+
 	query := c.signedQuery(map[string]string{"timestamp": ts})
 	req := &rt.Request{
 		Method: "GET",
 		URL:    base + path + "?" + query,
+		Cost:   cost,
 		Headers: map[string]string{
 			"X-MBX-APIKEY": c.apiKey,
 		},
@@ -512,6 +523,204 @@ func (c *Client) GetBalances(assetType string) ([]Balance, error) {
 	}
 	// Futures /fapi/v2/account uses different schema; we keep spot balances parity here.
 	return info.Balances, nil
+}
+
+type FuturesBalance struct {
+	Asset              string `json:"asset"`
+	Balance            string `json:"balance"`
+	CrossWalletBalance string `json:"crossWalletBalance"`
+	CrossUnPnl         string `json:"crossUnPnl"`
+	AvailableBalance   string `json:"availableBalance"`
+	MaxWithdrawAmount  string `json:"maxWithdrawAmount"`
+}
+
+func (c *Client) GetFuturesBalances() ([]FuturesBalance, error) {
+	if !c.isAuthenticated() {
+		return nil, fmt.Errorf("apiKey/apiSecret required")
+	}
+	params := map[string]string{
+		"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10),
+	}
+	query := c.signedQuery(params)
+	req := &rt.Request{
+		Method: "GET",
+		URL:    c.umBaseURL + "/fapi/v2/balance?" + query,
+		Cost:   5, // weight 5: https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/account
+		Headers: map[string]string{
+			"X-MBX-APIKEY": c.apiKey,
+		},
+	}
+
+	var resp []FuturesBalance
+	_, err := c.requester.Send(req, &resp)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+type FuturesPositionRisk struct {
+	Symbol           string `json:"symbol"`
+	PositionAmt      string `json:"positionAmt"`
+	EntryPrice       string `json:"entryPrice"`
+	MarkPrice        string `json:"markPrice"`
+	UnRealizedProfit string `json:"unRealizedProfit"`
+	LiquidationPrice string `json:"liquidationPrice"`
+	Leverage         string `json:"leverage"`
+	MarginType       string `json:"marginType"`
+	IsolatedMargin   string `json:"isolatedMargin"`
+	PositionSide     string `json:"positionSide"`
+	Notional         string `json:"notional"`
+}
+
+func (c *Client) GetFuturesPositions() ([]FuturesPositionRisk, error) {
+	if !c.isAuthenticated() {
+		return nil, fmt.Errorf("apiKey/apiSecret required")
+	}
+	params := map[string]string{
+		"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10),
+	}
+	query := c.signedQuery(params)
+	req := &rt.Request{
+		Method: "GET",
+		URL:    c.umBaseURL + "/fapi/v2/positionRisk?" + query,
+		Cost:   5, // weight 5: https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/trade
+		Headers: map[string]string{
+			"X-MBX-APIKEY": c.apiKey,
+		},
+	}
+
+	var resp []FuturesPositionRisk
+	_, err := c.requester.Send(req, &resp)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+type SpotOrder struct {
+	Symbol              string `json:"symbol"`
+	OrderID             int64  `json:"orderId"`
+	ClientOrderID       string `json:"clientOrderId"`
+	Price               string `json:"price"`
+	OrigQty             string `json:"origQty"`
+	ExecutedQty         string `json:"executedQty"`
+	CummulativeQuoteQty string `json:"cummulativeQuoteQty"`
+	Status              string `json:"status"`
+	TimeInForce         string `json:"timeInForce"`
+	Type                string `json:"type"`
+	Side                string `json:"side"`
+	StopPrice           string `json:"stopPrice"`
+	UpdateTime          int64  `json:"updateTime"`
+	Time                int64  `json:"time"`
+	IsWorking           bool   `json:"isWorking"`
+	OrigQuoteOrderQty   string `json:"origQuoteOrderQty"`
+}
+
+func (c *Client) GetSpotOrders(symbol string, openOnly bool) ([]SpotOrder, error) {
+	if !c.isAuthenticated() {
+		return nil, fmt.Errorf("apiKey/apiSecret required")
+	}
+
+	// Weights: openOrders = 6 with a symbol / 80 without; allOrders = 20.
+	// https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/account
+	path := "/api/v3/openOrders"
+	cost := 6
+	if symbol == "" {
+		cost = 80
+	}
+	if !openOnly {
+		path = "/api/v3/allOrders"
+		cost = 20
+	}
+
+	params := map[string]string{
+		"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10),
+	}
+	if symbol != "" {
+		params["symbol"] = c.toBinanceSymbol(symbol)
+	}
+
+	query := c.signedQuery(params)
+	req := &rt.Request{
+		Method: "GET",
+		URL:    c.spotBaseURL + path + "?" + query,
+		Cost:   cost,
+		Headers: map[string]string{
+			"X-MBX-APIKEY": c.apiKey,
+		},
+	}
+
+	var resp []SpotOrder
+	_, err := c.requester.Send(req, &resp)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+type FuturesOrder struct {
+	Symbol        string `json:"symbol"`
+	OrderID       int64  `json:"orderId"`
+	ClientOrderID string `json:"clientOrderId"`
+	Price         string `json:"price"`
+	OrigQty       string `json:"origQty"`
+	ExecutedQty   string `json:"executedQty"`
+	CumQuote      string `json:"cumQuote"`
+	Status        string `json:"status"`
+	TimeInForce   string `json:"timeInForce"`
+	Type          string `json:"type"`
+	Side          string `json:"side"`
+	PositionSide  string `json:"positionSide"`
+	StopPrice     string `json:"stopPrice"`
+	ReduceOnly    bool   `json:"reduceOnly"`
+	WorkingType   string `json:"workingType"`
+	ActivatePrice string `json:"activatePrice"`
+	PriceRate     string `json:"priceRate"`
+	UpdateTime    int64  `json:"updateTime"`
+	Time          int64  `json:"time"`
+}
+
+func (c *Client) GetFuturesOrders(symbol string, openOnly bool) ([]FuturesOrder, error) {
+	if !c.isAuthenticated() {
+		return nil, fmt.Errorf("apiKey/apiSecret required")
+	}
+
+	// Weights: openOrders = 1 with a symbol / 40 without; allOrders = 5.
+	// https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/trade
+	path := "/fapi/v1/openOrders"
+	cost := 1
+	if symbol == "" {
+		cost = 40
+	}
+	if !openOnly {
+		path = "/fapi/v1/allOrders"
+		cost = 5
+	}
+
+	params := map[string]string{
+		"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10),
+	}
+	if symbol != "" {
+		params["symbol"] = c.toBinanceSymbol(symbol)
+	}
+
+	query := c.signedQuery(params)
+	req := &rt.Request{
+		Method: "GET",
+		URL:    c.umBaseURL + path + "?" + query,
+		Cost:   cost,
+		Headers: map[string]string{
+			"X-MBX-APIKEY": c.apiKey,
+		},
+	}
+
+	var resp []FuturesOrder
+	_, err := c.requester.Send(req, &resp)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 // ---- helpers ----
@@ -559,7 +768,7 @@ type spotExchangeInfoResponse struct {
 }
 
 func (c *Client) getSpotExchangeInfo() (*spotExchangeInfoResponse, error) {
-	req := &rt.Request{Method: "GET", URL: c.spotBaseURL + "/api/v3/exchangeInfo?showPermissionSets=false", Headers: map[string]string{"Content-Type": "application/json"}}
+	req := &rt.Request{Method: "GET", URL: c.spotBaseURL + "/api/v3/exchangeInfo?showPermissionSets=false", Cost: 20, Headers: map[string]string{"Content-Type": "application/json"}} // weight 20: https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/general
 	var resp spotExchangeInfoResponse
 	_, err := c.requester.Send(req, &resp)
 	if err != nil {
@@ -580,7 +789,7 @@ type futuresExchangeInfoResponse struct {
 }
 
 func (c *Client) getFuturesExchangeInfo() (*futuresExchangeInfoResponse, error) {
-	req := &rt.Request{Method: "GET", URL: c.umBaseURL + "/fapi/v1/exchangeInfo", Headers: map[string]string{"Content-Type": "application/json"}}
+	req := &rt.Request{Method: "GET", URL: c.umBaseURL + "/fapi/v1/exchangeInfo", Cost: 1, Headers: map[string]string{"Content-Type": "application/json"}} // weight 1: https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data
 	var resp futuresExchangeInfoResponse
 	_, err := c.requester.Send(req, &resp)
 	if err != nil {
@@ -610,7 +819,16 @@ func (c *Client) getKlines(assetType, symbol, interval string, start, end *time.
 		q.Set("limit", strconv.Itoa(limit))
 	}
 
-	req := &rt.Request{Method: "GET", URL: base + path + "?" + q.Encode(), Headers: map[string]string{"Content-Type": "application/json"}}
+	// Request weights: spot klines are a flat 2; futures klines are tiered by
+	// the limit parameter.
+	// https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/market
+	// https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data
+	cost := 2
+	if assetType == "futures" {
+		cost = futuresKlinesCost(limit)
+	}
+
+	req := &rt.Request{Method: "GET", URL: base + path + "?" + q.Encode(), Cost: cost, Headers: map[string]string{"Content-Type": "application/json"}}
 	var raw [][]any
 	_, err := c.requester.Send(req, &raw)
 	if err != nil {
@@ -631,10 +849,28 @@ func (c *Client) getKlines(assetType, symbol, interval string, start, end *time.
 			Low:      asString(row[3]),
 			Close:    asString(row[4]),
 			Volume:   asString(row[5]),
+			IsClosed: true,
 		})
 	}
 
 	return records, nil
+}
+
+// futuresKlinesCost maps the /fapi/v1/klines limit parameter to its request
+// weight: [1,100) = 1, [100,500) = 2, [500,1000] = 5, >1000 = 10. A limit of
+// 0 means the API default of 500, which lands in the [500,1000] tier.
+// https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data
+func futuresKlinesCost(limit int) int {
+	switch {
+	case limit <= 0, limit >= 500 && limit <= 1000:
+		return 5
+	case limit < 100:
+		return 1
+	case limit < 500:
+		return 2
+	default:
+		return 10
+	}
 }
 
 func asString(v any) string {
