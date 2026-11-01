@@ -75,6 +75,18 @@ func TestRateLimitDeclarations(t *testing.T) {
 		if tgt.TradingReserve == nil || *tgt.TradingReserve != tc.reserve {
 			t.Errorf("%s: TradingReserve = %v, want %v", tc.pattern, tgt.TradingReserve, tc.reserve)
 		}
+		wantHdrs := []m.UsageHeader{
+			{Prefix: "x-mbx-used-weight-", Name: "used-weight-", Field: m.UsageFieldUsed},
+			{Prefix: "x-mbx-order-count-", Name: "order-count-", Field: m.UsageFieldUsed},
+		}
+		if len(tgt.UsageHeaders) != len(wantHdrs) {
+			t.Fatalf("%s: got %d usage headers, want %d", tc.pattern, len(tgt.UsageHeaders), len(wantHdrs))
+		}
+		for i, wh := range wantHdrs {
+			if tgt.UsageHeaders[i] != wh {
+				t.Errorf("%s: usage header %d = %+v, want %+v", tc.pattern, i, tgt.UsageHeaders[i], wh)
+			}
+		}
 		if len(tgt.Limits) != len(tc.rules) {
 			t.Fatalf("%s: got %d limits, want %d", tc.pattern, len(tgt.Limits), len(tc.rules))
 		}

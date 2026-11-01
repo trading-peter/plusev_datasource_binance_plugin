@@ -59,7 +59,7 @@ func (p *BinancePlugin) GetMeta() m.Meta {
 		Category:    "cex",
 		Description: "Adds support for Binance Exchange",
 		Author:      "trading_peter",
-		Version: "v1.1.0",
+		Version: "v1.2.0",
 		Repository:  "https://github.com/trading-peter/plusev_datasource_binance_plugin",
 		Tags:        []string{"binance", "crypto", "exchange", "spot", "futures"},
 		Contacts: []m.AuthorContact{
@@ -74,11 +74,16 @@ func (p *BinancePlugin) GetMeta() m.Meta {
 					Pattern:        "https://api.binance.com/*",
 					Limits:         spotRateLimits(),
 					TradingReserve: &tradingReserve,
+					// Server usage headers for the Rate Limits page display.
+					// Declared here since Terminal no longer hardcodes
+					// venue-specific header names.
+					UsageHeaders: binanceUsageHeaders(),
 				},
 				{
 					Pattern:        "https://fapi.binance.com/*",
 					Limits:         futuresRateLimits(),
 					TradingReserve: &tradingReserve,
+					UsageHeaders:   binanceUsageHeaders(),
 				},
 				// Spot klines streaming (PrepareStream). Was missing, so spot WS
 				// connections were refused by the network policy (only fstream
@@ -164,6 +169,16 @@ func futuresRateLimits() []m.RateLimitRule {
 		// ORDERS: 1200 orders/1min per account, on order placement endpoints.
 		// https://fapi.binance.com/fapi/v1/exchangeInfo (rateLimits array, retrieved 2026-10-31)
 		m.NewRateLimitRule("orders-1m", 1200, time.Minute).WithLabel("Order rate (1m)").PerCredential().ForPaths("/fapi/v1/order", "/fapi/v1/batchOrders"),
+	}
+}
+
+// binanceUsageHeaders declares the rate-limit usage response headers both
+// REST hosts send (spot and USDⓈ-M futures), so the host can show live
+// usage per window on its Rate Limits page. Display-only.
+func binanceUsageHeaders() []m.UsageHeader {
+	return []m.UsageHeader{
+		{Prefix: "x-mbx-used-weight-", Name: "used-weight-", Field: m.UsageFieldUsed},
+		{Prefix: "x-mbx-order-count-", Name: "order-count-", Field: m.UsageFieldUsed},
 	}
 }
 

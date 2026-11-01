@@ -15,4 +15,4 @@ require (
 	golang.org/x/text v0.29.0 // indirect
 )
 
-require github.com/plusev-terminal/go-plugin-common/v2 v2.1.0
+require github.com/plusev-terminal/go-plugin-common/v2 v2.2.0
