@@ -59,7 +59,7 @@ func (p *BinancePlugin) GetMeta() m.Meta {
 		Category:    "cex",
 		Description: "Adds support for Binance Exchange",
 		Author:      "trading_peter",
-		Version:     "v1.0.0",
+		Version: "v1.1.0",
 		Repository:  "https://github.com/trading-peter/plusev_datasource_binance_plugin",
 		Tags:        []string{"binance", "crypto", "exchange", "spot", "futures"},
 		Contacts: []m.AuthorContact{
