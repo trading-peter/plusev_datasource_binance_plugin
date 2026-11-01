@@ -2,7 +2,7 @@ module github.com/trading-peter/plusev_datasource_binance_plugin
 
 go 1.25.1
 
-require github.com/plusev-terminal/go-plugin-common/v2 v2.0.0
+require github.com/plusev-terminal/go-plugin-common/v2 v2.0.1
 
 // Removing duplicated require block
 require (
