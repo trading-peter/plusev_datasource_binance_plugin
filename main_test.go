@@ -4,7 +4,10 @@ import (
 	"testing"
 	"time"
 
+	acct "github.com/plusev-terminal/go-plugin-common/v2/datasrc/exchange/account"
 	m "github.com/plusev-terminal/go-plugin-common/v2/meta"
+
+	"github.com/trading-peter/plusev_datasource_binance_plugin/binance"
 )
 
 // TestRateLimitDeclarations pins the manifest rate-limit table (hosts, limits,
@@ -13,8 +16,8 @@ import (
 // spotRateLimits/futuresRateLimits in main.go.
 func TestRateLimitDeclarations(t *testing.T) {
 	targets := (&BinancePlugin{}).GetMeta().Resources.AllowedNetworkTargets
-	if len(targets) != 3 {
-		t.Fatalf("expected 3 network targets, got %d", len(targets))
+	if len(targets) != 4 {
+		t.Fatalf("expected 4 network targets (spot REST, futures REST, spot WS, futures WS), got %d", len(targets))
 	}
 
 	byPattern := map[string]m.NetworkTargetRule{}
@@ -23,7 +26,10 @@ func TestRateLimitDeclarations(t *testing.T) {
 	}
 
 	if ws := byPattern["wss://fstream.binance.com/*"]; len(ws.Limits) != 0 {
-		t.Errorf("ws target must not carry limits, got %d", len(ws.Limits))
+		t.Errorf("futures ws target must not carry limits, got %d", len(ws.Limits))
+	}
+	if ws := byPattern["wss://stream.binance.com:9443/*"]; len(ws.Limits) != 0 {
+		t.Errorf("spot ws target must not carry limits, got %d", len(ws.Limits))
 	}
 
 	type wantRule struct {
@@ -107,6 +113,122 @@ func TestRateLimitDeclarations(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestVenuePrice pins the absent-price rule: Binance reports "no price" as
+// "0"/"0.00000000"; the contract's absent price is the empty string.
+func TestVenuePrice(t *testing.T) {
+	cases := map[string]string{
+		"":             "",
+		" ":            "",
+		"0":            "",
+		"0.0":          "",
+		"0.00000000":   "",
+		" 0.00000000 ": "",
+		"65000.10":     "65000.10",
+		"0.5":          "0.5",
+		"n/a":          "n/a",
+	}
+	for in, want := range cases {
+		if got := venuePrice(in); got != want {
+			t.Errorf("venuePrice(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestMapSpotOrderAbsentPrices guards the zero-price bug on the spot mapping:
+// a plain limit order (stopPrice "0.00000000") carries no TriggerPrice, a
+// plain market order (price "0.00000000") carries no Price — never "0".
+func TestMapSpotOrderAbsentPrices(t *testing.T) {
+	limit := mapSpotOrder(binance.SpotOrder{
+		OrderID: 1, Symbol: "BTCUSDT", Side: "BUY", Type: "LIMIT",
+		Price: "65000.00", OrigQty: "1", ExecutedQty: "0",
+		StopPrice: "0.00000000", Status: "NEW", TimeInForce: "GTC",
+	})
+	if limit.Price != "65000.00" {
+		t.Errorf("limit.Price = %q, want 65000.00", limit.Price)
+	}
+	if limit.TimeInForce != acct.TimeInForceGTC {
+		t.Errorf("limit.TimeInForce = %q, want %q", limit.TimeInForce, acct.TimeInForceGTC)
+	}
+	if limit.TriggerPrice != "" {
+		t.Errorf("limit.TriggerPrice = %q, want empty (venue stopPrice \"0.00000000\" means absent)", limit.TriggerPrice)
+	}
+
+	market := mapSpotOrder(binance.SpotOrder{
+		OrderID: 2, Symbol: "BTCUSDT", Side: "SELL", Type: "MARKET",
+		Price: "0.00000000", OrigQty: "1", ExecutedQty: "1",
+		StopPrice: "0", Status: "FILLED",
+	})
+	if market.Price != "" {
+		t.Errorf("market.Price = %q, want empty (venue price \"0.00000000\" means absent)", market.Price)
+	}
+	if market.TriggerPrice != "" {
+		t.Errorf("market.TriggerPrice = %q, want empty", market.TriggerPrice)
+	}
+
+	stop := mapSpotOrder(binance.SpotOrder{
+		OrderID: 3, Symbol: "BTCUSDT", Side: "SELL", Type: "STOP_LOSS_LIMIT",
+		Price: "64000.00", OrigQty: "1", ExecutedQty: "0",
+		StopPrice: "63000.00", Status: "NEW", TimeInForce: "GTC",
+	})
+	if stop.TriggerPrice != "63000.00" {
+		t.Errorf("stop.TriggerPrice = %q, want 63000.00 (real triggers survive normalization)", stop.TriggerPrice)
+	}
+}
+
+// TestMapFuturesOrderAbsentPrices guards the zero-price bug on the USDM
+// mapping: a plain futures limit order (stopPrice "0") carries no
+// TriggerPrice; a stop-market order reports price "0" with the real trigger
+// in stopPrice; a trailing stop reports stopPrice "0" with its activation in
+// activatePrice.
+func TestMapFuturesOrderAbsentPrices(t *testing.T) {
+	limit := mapFuturesOrder(binance.FuturesOrder{
+		OrderID: 1, Symbol: "BTCUSDT", Side: "BUY", Type: "LIMIT",
+		Price: "65000.00", OrigQty: "1", ExecutedQty: "0",
+		StopPrice: "0", ActivatePrice: "0", Status: "NEW", TimeInForce: "GTC",
+		ReduceOnly: true,
+	})
+	if limit.Price != "65000.00" {
+		t.Errorf("limit.Price = %q, want 65000.00", limit.Price)
+	}
+	if limit.TimeInForce != acct.TimeInForceGTC {
+		t.Errorf("limit.TimeInForce = %q, want %q", limit.TimeInForce, acct.TimeInForceGTC)
+	}
+	if !limit.ReduceOnly {
+		t.Error("limit.ReduceOnly = false, want true (venue reduceOnly must carry through)")
+	}
+	if limit.TriggerPrice != "" {
+		t.Errorf("limit.TriggerPrice = %q, want empty (venue stopPrice \"0\" means absent)", limit.TriggerPrice)
+	}
+
+	stopMarket := mapFuturesOrder(binance.FuturesOrder{
+		OrderID: 2, Symbol: "BTCUSDT", Side: "SELL", Type: "STOP_MARKET",
+		Price: "0", OrigQty: "1", ExecutedQty: "0",
+		StopPrice: "61000.00", Status: "NEW", WorkingType: "MARK_PRICE",
+	})
+	if stopMarket.Price != "" {
+		t.Errorf("stopMarket.Price = %q, want empty (venue price \"0\" means absent)", stopMarket.Price)
+	}
+	if stopMarket.TriggerPrice != "61000.00" {
+		t.Errorf("stopMarket.TriggerPrice = %q, want 61000.00 (the real trigger)", stopMarket.TriggerPrice)
+	}
+
+	trailing := mapFuturesOrder(binance.FuturesOrder{
+		OrderID: 3, Symbol: "BTCUSDT", Side: "SELL", Type: "TRAILING_STOP_MARKET",
+		Price: "0", OrigQty: "1", ExecutedQty: "0",
+		StopPrice: "0", ActivatePrice: "42100.10", PriceRate: "0.4",
+		Status: "NEW", WorkingType: "CONTRACT_PRICE",
+	})
+	if trailing.TriggerPrice != "42100.10" {
+		t.Errorf("trailing.TriggerPrice = %q, want 42100.10 (activation price, not the \"0\" stopPrice)", trailing.TriggerPrice)
+	}
+	if stopMarket.TriggerSource != acct.TriggerSourceMark {
+		t.Errorf("stopMarket.TriggerSource = %q, want %q (MARK_PRICE)", stopMarket.TriggerSource, acct.TriggerSourceMark)
+	}
+	if trailing.TriggerSource != acct.TriggerSourceLast {
+		t.Errorf("trailing.TriggerSource = %q, want %q (CONTRACT_PRICE)", trailing.TriggerSource, acct.TriggerSourceLast)
 	}
 }
 

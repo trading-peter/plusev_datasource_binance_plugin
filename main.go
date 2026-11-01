@@ -12,6 +12,7 @@ import (
 	"github.com/plusev-terminal/go-plugin-common/v2/plugin"
 	"github.com/plusev-terminal/go-plugin-common/v2/requester"
 	commonstream "github.com/plusev-terminal/go-plugin-common/v2/stream"
+	tt "github.com/plusev-terminal/go-plugin-common/v2/trading"
 
 	"github.com/trading-peter/plusev_datasource_binance_plugin/binance"
 )
@@ -234,9 +235,9 @@ func (p *BinancePlugin) handleGetTimeframes(params map[string]any) plugin.Respon
 
 func (p *BinancePlugin) handleGetOHLCV(params map[string]any) plugin.Response {
 	ohlcvParams := ex.GetOHLCVParamsFromMap(params)
-	assetType := "spot"
-	if at := strings.TrimSpace(string(ohlcvParams.Market.AssetType)); at != "" {
-		assetType = at
+	assetType := tt.AssetType(strings.TrimSpace(string(ohlcvParams.Market.AssetType)))
+	if assetType == "" {
+		assetType = tt.AssetTypeSpot
 	}
 
 	if strings.TrimSpace(ohlcvParams.Market.Symbol) == "" {
@@ -438,7 +439,7 @@ func (p *BinancePlugin) handleGetBalances(params map[string]any) plugin.Response
 	}
 
 	if shouldFetchScope(parsed.Scopes, acct.ScopeSpot) {
-		balances, err := p.client.GetBalances("spot")
+		balances, err := p.client.GetBalances(tt.AssetTypeSpot)
 		if err != nil {
 			return plugin.ErrorResponse(err)
 		}
@@ -638,47 +639,7 @@ func (p *BinancePlugin) handleGetOrders(params map[string]any) plugin.Response {
 	spotOrders := make([]acct.Order, 0, len(spotRows))
 
 	for _, o := range spotRows {
-		orderType, postOnly := normalizeBinanceOrderType(o.Type)
-		remaining := ""
-
-		if o.OrigQty != "" && o.ExecutedQty != "" {
-			if q, err := strconv.ParseFloat(o.OrigQty, 64); err == nil {
-				if exq, err := strconv.ParseFloat(o.ExecutedQty, 64); err == nil {
-					remaining = fmt.Sprintf("%.15g", q-exq)
-				}
-			}
-		}
-
-		order := acct.Order{
-			OrderID:           fmt.Sprintf("%d", o.OrderID),
-			ClientOrderID:     o.ClientOrderID,
-			Symbol:            o.Symbol,
-			Side:              normalizeBinanceSide(o.Side),
-			Type:              orderType,
-			Status:            normalizeBinanceStatus(o.Status),
-			Price:             o.Price,
-			Quantity:          o.OrigQty,
-			ExecutedQuantity:  o.ExecutedQty,
-			RemainingQuantity: remaining,
-			TimeInForce:       normalizeBinanceTimeInForce(o.TimeInForce),
-			PostOnly:          postOnly,
-			TriggerPrice:      o.StopPrice,
-			Components: map[string]string{
-				"cummulative_quote_qty": o.CummulativeQuoteQty,
-				"orig_quote_qty":        o.OrigQuoteOrderQty,
-			},
-			Extra: map[string]any{},
-		}
-
-		if o.Time > 0 {
-			order.CreatedAt = time.UnixMilli(o.Time)
-		}
-
-		if o.UpdateTime > 0 {
-			order.UpdatedAt = time.UnixMilli(o.UpdateTime)
-		}
-
-		spotOrders = append(spotOrders, order)
+		spotOrders = append(spotOrders, mapSpotOrder(o))
 	}
 
 	if len(spotOrders) > 0 {
@@ -703,51 +664,7 @@ func (p *BinancePlugin) handleGetOrders(params map[string]any) plugin.Response {
 	futOrders := make([]acct.Order, 0, len(futRows))
 
 	for _, o := range futRows {
-		orderType, postOnly := normalizeBinanceOrderType(o.Type)
-		remaining := ""
-
-		if o.OrigQty != "" && o.ExecutedQty != "" {
-			if q, err := strconv.ParseFloat(o.OrigQty, 64); err == nil {
-				if exq, err := strconv.ParseFloat(o.ExecutedQty, 64); err == nil {
-					remaining = fmt.Sprintf("%.15g", q-exq)
-				}
-			}
-		}
-
-		order := acct.Order{
-			OrderID:           fmt.Sprintf("%d", o.OrderID),
-			ClientOrderID:     o.ClientOrderID,
-			Symbol:            o.Symbol,
-			Side:              normalizeBinanceSide(o.Side),
-			Type:              orderType,
-			Status:            normalizeBinanceStatus(o.Status),
-			Price:             o.Price,
-			Quantity:          o.OrigQty,
-			ExecutedQuantity:  o.ExecutedQty,
-			RemainingQuantity: remaining,
-			TimeInForce:       normalizeBinanceTimeInForce(o.TimeInForce),
-			ReduceOnly:        o.ReduceOnly,
-			PostOnly:          postOnly,
-			TriggerPrice:      firstNonEmptyString(o.StopPrice, o.ActivatePrice),
-			TriggerSource:     normalizeBinanceWorkingType(o.WorkingType),
-			Components: map[string]string{
-				"position_side":  o.PositionSide,
-				"cum_quote":      o.CumQuote,
-				"activate_price": o.ActivatePrice,
-				"price_rate":     o.PriceRate,
-			},
-			Extra: map[string]any{},
-		}
-
-		if o.Time > 0 {
-			order.CreatedAt = time.UnixMilli(o.Time)
-		}
-
-		if o.UpdateTime > 0 {
-			order.UpdatedAt = time.UnixMilli(o.UpdateTime)
-		}
-
-		futOrders = append(futOrders, order)
+		futOrders = append(futOrders, mapFuturesOrder(o))
 	}
 
 	if len(futOrders) > 0 {
@@ -769,6 +686,119 @@ func firstNonEmptyString(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// mapSpotOrder normalizes one spot venue order row onto the contract's
+// acct.Order. Venue "0" prices mean "absent" and become "" (venuePrice).
+func mapSpotOrder(o binance.SpotOrder) acct.Order {
+	orderType, postOnly := normalizeBinanceOrderType(o.Type)
+	remaining := ""
+
+	if o.OrigQty != "" && o.ExecutedQty != "" {
+		if q, err := strconv.ParseFloat(o.OrigQty, 64); err == nil {
+			if exq, err := strconv.ParseFloat(o.ExecutedQty, 64); err == nil {
+				remaining = fmt.Sprintf("%.15g", q-exq)
+			}
+		}
+	}
+
+	order := acct.Order{
+		OrderID:           fmt.Sprintf("%d", o.OrderID),
+		ClientOrderID:     o.ClientOrderID,
+		Symbol:            o.Symbol,
+		Side:              normalizeBinanceSide(o.Side),
+		Type:              orderType,
+		Status:            normalizeBinanceStatus(o.Status),
+		Price:             venuePrice(o.Price),
+		Quantity:          o.OrigQty,
+		ExecutedQuantity:  o.ExecutedQty,
+		RemainingQuantity: remaining,
+		TimeInForce:       normalizeBinanceTimeInForce(o.TimeInForce),
+		PostOnly:          postOnly,
+		TriggerPrice:      venuePrice(o.StopPrice),
+		Components: map[string]string{
+			"cummulative_quote_qty": o.CummulativeQuoteQty,
+			"orig_quote_qty":        o.OrigQuoteOrderQty,
+		},
+		Extra: map[string]any{},
+	}
+
+	if o.Time > 0 {
+		order.CreatedAt = time.UnixMilli(o.Time)
+	}
+
+	if o.UpdateTime > 0 {
+		order.UpdatedAt = time.UnixMilli(o.UpdateTime)
+	}
+
+	return order
+}
+
+// mapFuturesOrder normalizes one USDM-futures venue order row onto the
+// contract's acct.Order. Venue "0" prices mean "absent" and become ""
+// (venuePrice); a trailing stop reports its activation in activatePrice where
+// plain stops carry stopPrice, so both are normalized before picking.
+func mapFuturesOrder(o binance.FuturesOrder) acct.Order {
+	orderType, postOnly := normalizeBinanceOrderType(o.Type)
+	remaining := ""
+
+	if o.OrigQty != "" && o.ExecutedQty != "" {
+		if q, err := strconv.ParseFloat(o.OrigQty, 64); err == nil {
+			if exq, err := strconv.ParseFloat(o.ExecutedQty, 64); err == nil {
+				remaining = fmt.Sprintf("%.15g", q-exq)
+			}
+		}
+	}
+
+	order := acct.Order{
+		OrderID:           fmt.Sprintf("%d", o.OrderID),
+		ClientOrderID:     o.ClientOrderID,
+		Symbol:            o.Symbol,
+		Side:              normalizeBinanceSide(o.Side),
+		Type:              orderType,
+		Status:            normalizeBinanceStatus(o.Status),
+		Price:             venuePrice(o.Price),
+		Quantity:          o.OrigQty,
+		ExecutedQuantity:  o.ExecutedQty,
+		RemainingQuantity: remaining,
+		TimeInForce:       normalizeBinanceTimeInForce(o.TimeInForce),
+		ReduceOnly:        o.ReduceOnly,
+		PostOnly:          postOnly,
+		TriggerPrice:      firstNonEmptyString(venuePrice(o.StopPrice), venuePrice(o.ActivatePrice)),
+		TriggerSource:     normalizeBinanceWorkingType(o.WorkingType),
+		Components: map[string]string{
+			"position_side":  o.PositionSide,
+			"cum_quote":      o.CumQuote,
+			"activate_price": o.ActivatePrice,
+			"price_rate":     o.PriceRate,
+		},
+		Extra: map[string]any{},
+	}
+
+	if o.Time > 0 {
+		order.CreatedAt = time.UnixMilli(o.Time)
+	}
+
+	if o.UpdateTime > 0 {
+		order.UpdatedAt = time.UnixMilli(o.UpdateTime)
+	}
+
+	return order
+}
+
+// venuePrice maps a venue price field onto the contract's absent-price value.
+// Binance reports "no price" as "0"/"0.00000000" (a plain limit order's
+// stopPrice, a stop-market order's price); the contract represents an absent
+// price as the empty string, never "0".
+func venuePrice(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return ""
+	}
+	if v, err := strconv.ParseFloat(trimmed, 64); err == nil && v == 0 {
+		return ""
+	}
+	return s
 }
 
 // normalizeBinanceWorkingType maps Binance futures workingType onto the

@@ -2,9 +2,6 @@ module github.com/trading-peter/plusev_datasource_binance_plugin
 
 go 1.25.1
 
-require github.com/plusev-terminal/go-plugin-common/v2 v2.0.1
-
-// Removing duplicated require block
 require (
 	github.com/extism/go-pdk v1.1.3 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.10 // indirect
@@ -18,4 +15,4 @@ require (
 	golang.org/x/text v0.29.0 // indirect
 )
 
-replace github.com/plusev-terminal/go-plugin-common => ../plusev/go-plugin-common
+require github.com/plusev-terminal/go-plugin-common/v2 v2.1.0

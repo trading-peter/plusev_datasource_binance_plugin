@@ -31,9 +31,15 @@ type Client struct {
 }
 
 func NewClient(req *requester.Requester, baseURL string) *Client {
+	return NewClientWithDoer(req, baseURL)
+}
+
+// NewClientWithDoer builds a client around any RequestDoer (the production
+// host requester or a test double).
+func NewClientWithDoer(doer rt.RequestDoer, baseURL string) *Client {
 	return &Client{
 		log:         logging.NewLogger("binance-datasource"),
-		requester:   req,
+		requester:   doer,
 		spotBaseURL: baseURL,
 		umBaseURL:   "https://fapi.binance.com",
 	}
@@ -86,7 +92,7 @@ func (c *Client) GetMarkets() ([]tt.Market, error) {
 			continue
 		}
 
-		markets = append(markets, parseBinanceSymbolToMarketInfo(s, "spot"))
+		markets = append(markets, parseBinanceSymbolToMarketInfo(s, tt.AssetTypeSpot))
 	}
 
 	// for _, s := range futuresInfo.Symbols {
@@ -106,12 +112,12 @@ func (c *Client) GetMarkets() ([]tt.Market, error) {
 }
 
 // parseBinanceSymbolToMarketInfo converts one Binance symbol to tt.Market
-func parseBinanceSymbolToMarketInfo(sym binanceSymbol, assetType string) tt.Market {
+func parseBinanceSymbolToMarketInfo(sym binanceSymbol, assetType tt.AssetType) tt.Market {
 	mi := tt.Market{
 		Symbol:    sym.Symbol,
 		Base:      sym.BaseAsset,
 		Quote:     sym.QuoteAsset,
-		AssetType: tt.AssetType(assetType), // caller sets "spot", "perpetual", etc.
+		AssetType: assetType, // caller sets spot, perpetual, etc.
 		Status:    sym.Status,
 		Label:     fmt.Sprintf("%s/%s", sym.BaseAsset, sym.QuoteAsset),
 	}
@@ -151,7 +157,7 @@ func parseBinanceSymbolToMarketInfo(sym binanceSymbol, assetType string) tt.Mark
 		mi.ContractSize = sym.ContractSize
 	}
 	// For linear USDT-margined perps, contractSize is usually "1" (implied)
-	if assetType == "perpetual" && mi.ContractSize == "" {
+	if assetType == tt.AssetTypePerpetual && mi.ContractSize == "" {
 		mi.ContractSize = "1"
 	}
 
@@ -225,12 +231,12 @@ func (c *Client) GetTimeframes() []tt.Timeframe {
 
 // GetOHLCV fetches historical OHLCV data
 func (c *Client) GetOHLCV(req ex.GetOHLCVParams) ([]tt.OHLCVRecord, error) {
-	return c.GetOHLCVWithAssetType(req, "spot")
+	return c.GetOHLCVWithAssetType(req, tt.AssetTypeSpot)
 }
 
-func (c *Client) GetOHLCVWithAssetType(req ex.GetOHLCVParams, assetType string) ([]tt.OHLCVRecord, error) {
+func (c *Client) GetOHLCVWithAssetType(req ex.GetOHLCVParams, assetType tt.AssetType) ([]tt.OHLCVRecord, error) {
 	if assetType == "" {
-		assetType = "spot"
+		assetType = tt.AssetTypeSpot
 	}
 
 	interval := c.toBinanceInterval(req.Timeframe)
@@ -263,12 +269,12 @@ func (c *Client) PrepareStream(req plugin.StreamSetupRequest) (plugin.StreamSetu
 
 	ctxSymbol, _ := streamContext["symbol"].(string)
 	ctxTimeframe, _ := streamContext["timeframe"].(string)
-	ctxAssetType, _ := streamContext["assetType"].(string)
+	ctxAssetTypeRaw, _ := streamContext["assetType"].(string)
 	ctxSymbol = strings.TrimSpace(ctxSymbol)
 	ctxTimeframe = strings.TrimSpace(ctxTimeframe)
-	ctxAssetType = strings.TrimSpace(ctxAssetType)
+	ctxAssetType := tt.AssetType(strings.TrimSpace(ctxAssetTypeRaw))
 	if ctxAssetType == "" {
-		ctxAssetType = "spot"
+		ctxAssetType = tt.AssetTypeSpot
 	}
 
 	// Log what we got (helps debug host->plugin param encoding).
@@ -298,7 +304,7 @@ func (c *Client) PrepareStream(req plugin.StreamSetupRequest) (plugin.StreamSetu
 	// For simplicity, let's use the raw stream URL and send subscription
 	wsURL := "wss://stream.binance.com:9443/ws"
 
-	if ctxAssetType == "futures" {
+	if isUSDMFutures(ctxAssetType) {
 		wsURL = "wss://fstream.binance.com/ws"
 	}
 
@@ -438,6 +444,14 @@ func (c *Client) toBinanceSymbol(symbol string) string {
 	return strings.ReplaceAll(strings.ToUpper(symbol), "/", "")
 }
 
+// isUSDMFutures reports whether at is served by the USDⓈ-M futures
+// endpoints: linear perpetuals publish as "perpetual" and dated contracts as
+// "futures" — both live on fapi.binance.com / fstream.binance.com, while
+// "spot" stays on the spot hosts.
+func isUSDMFutures(at tt.AssetType) bool {
+	return at == tt.AssetTypePerpetual || at == tt.AssetTypeFutures
+}
+
 // ---- Private endpoints parity (account info, balances, orders) ----
 
 type Balance struct {
@@ -474,18 +488,18 @@ func (c *Client) signedQuery(params map[string]string) string {
 	return query + "&signature=" + sig
 }
 
-func (c *Client) GetAccountInfo(assetType string) (*AccountInfo, error) {
+func (c *Client) GetAccountInfo(assetType tt.AssetType) (*AccountInfo, error) {
 	if !c.isAuthenticated() {
 		return nil, fmt.Errorf("apiKey/apiSecret required")
 	}
 	if assetType == "" {
-		assetType = "spot"
+		assetType = tt.AssetTypeSpot
 	}
 
 	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	path := "/api/v3/account"
 	base := c.spotBaseURL
-	if assetType == "futures" {
+	if isUSDMFutures(assetType) {
 		path = "/fapi/v2/account"
 		base = c.umBaseURL
 	}
@@ -494,7 +508,7 @@ func (c *Client) GetAccountInfo(assetType string) (*AccountInfo, error) {
 	// https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/account
 	// https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/account
 	cost := 20
-	if assetType == "futures" {
+	if isUSDMFutures(assetType) {
 		cost = 5
 	}
 
@@ -516,7 +530,7 @@ func (c *Client) GetAccountInfo(assetType string) (*AccountInfo, error) {
 	return &resp, nil
 }
 
-func (c *Client) GetBalances(assetType string) ([]Balance, error) {
+func (c *Client) GetBalances(assetType tt.AssetType) ([]Balance, error) {
 	info, err := c.GetAccountInfo(assetType)
 	if err != nil {
 		return nil, err
@@ -798,10 +812,10 @@ func (c *Client) getFuturesExchangeInfo() (*futuresExchangeInfoResponse, error) 
 	return &resp, nil
 }
 
-func (c *Client) getKlines(assetType, symbol, interval string, start, end *time.Time, limit int) ([]tt.OHLCVRecord, error) {
+func (c *Client) getKlines(assetType tt.AssetType, symbol, interval string, start, end *time.Time, limit int) ([]tt.OHLCVRecord, error) {
 	base := c.spotBaseURL
 	path := "/api/v3/klines"
-	if assetType == "futures" {
+	if isUSDMFutures(assetType) {
 		base = c.umBaseURL
 		path = "/fapi/v1/klines"
 	}
@@ -824,7 +838,7 @@ func (c *Client) getKlines(assetType, symbol, interval string, start, end *time.
 	// https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/market
 	// https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data
 	cost := 2
-	if assetType == "futures" {
+	if isUSDMFutures(assetType) {
 		cost = futuresKlinesCost(limit)
 	}
 
